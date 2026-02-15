@@ -1,7 +1,5 @@
 """Controller module for logvine key-value store.
-
-Manages the overall write and read operations, coordinating between
-MemTable, WAL, and SSTables. Handles network requests, request parsing,
+Handles network requests, request parsing,
 routing in distributed scenarios, and concurrency control.
 """
 

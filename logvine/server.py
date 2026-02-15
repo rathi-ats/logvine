@@ -118,23 +118,27 @@ async def run_server(
         num_nodes: Total nodes in the cluster.
     """
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.DEBUG,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
-
-    controller = Controller(
-        storage_path, node_id=node_id, num_nodes=num_nodes
-    )
-    server = LogvineServer(controller, host=host, port=port)
 
     # Create wal directory if it doesn't exist
     os.makedirs(storage_path, exist_ok=True)
 
     # Create wal file if it doesn't exist
     wal_path = os.path.join(storage_path, "wal.log")
+    if os.path.isdir(wal_path):
+        import shutil
+        shutil.rmtree(wal_path)  # Remove the directory if it exists
+    
     if not os.path.exists(wal_path):
         with open(wal_path, "wb") as f:
             pass  # Just create an empty file
+
+    controller = Controller(
+        storage_path, node_id=node_id, num_nodes=num_nodes
+    )
+    server = LogvineServer(controller, host=host, port=port)
 
     try:
         await server.start()
