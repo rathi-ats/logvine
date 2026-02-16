@@ -117,18 +117,8 @@ async def run_server(
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
 
-    # Create wal directory if it doesn't exist
+    # Create storage directory if it doesn't exist
     os.makedirs(storage_path, exist_ok=True)
-
-    # Create wal file if it doesn't exist
-    wal_path = os.path.join(storage_path, "wal.log")
-    if os.path.isdir(wal_path):
-        import shutil
-        shutil.rmtree(wal_path)  # Remove the directory if it exists
-    
-    if not os.path.exists(wal_path):
-        with open(wal_path, "wb") as f:
-            pass  # Just create an empty file
 
     controller = Controller(
         storage_path, node_id=node_id, num_nodes=num_nodes

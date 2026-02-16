@@ -37,12 +37,15 @@ class WAL:
         """Open the WAL file for writing."""
         if not self.path.parent.exists():
             self.path.parent.mkdir(parents=True, exist_ok=True)
+            logger.debug(f"Created WAL directory: {self.path.parent}")
         if not self.path.exists():
             self.path.touch()
+            logger.debug(f"Created WAL file: {self.path}")
         try:
             self.file = self.path.open("ab+")
+            logger.debug(f"Opened WAL file handle: {self.path}")
         except Exception as e:
-            print(f"Error opening WAL: {e}")
+            logger.exception(f"Error opening WAL: {self.path}")
             raise
 
 
@@ -50,6 +53,7 @@ class WAL:
         """Close the WAL file."""
         if self.file:
             self.file.close()
+            logger.debug(f"Closed WAL file handle: {self.path}")
 
     def append(self, operation: int, key: bytes, value: bytes) -> int:
         """Append a write operation to the log.
@@ -59,24 +63,25 @@ class WAL:
             value: The value being written.
         """
 
-        logger.info(f"Appending to WAL: operation={operation}, key={key}, value_length={len(value)}")
+        logger.debug(f"Appending to WAL: operation={operation}, key={key}, value_length={len(value)}")
 
         if not self.file:
             self.open()
         
         with self._lock:
             try:
-
                 record = self.construct_record(operation, key, value)
                 record_offset = self.file.tell()
                 self.file.write(record)
                 self.file.flush()
                 os.fsync(self.file.fileno())
-                logger.info(f"Appended to WAL: operation={operation}, key={key}, value_length={len(value)}, offset={record_offset}")
+                logger.debug(
+                    f"Appended to WAL: operation={operation}, key={key}, "
+                    f"value_length={len(value)}, offset={record_offset}"
+                )
                 return record_offset
             except Exception as e:
-                # Handle exceptions (e.g., disk full, permission issues)
-                print(f"Error writing to WAL: {e}")
+                logger.exception("Error writing WAL record")
                 raise
 
 
@@ -88,6 +93,13 @@ class WAL:
             Tuples of (operation_type, key, value, record_offset) where operation_type
             is 'put' or 'delete'.
         """
+        if not self.path.exists():
+            logger.info(f"WAL replay skipped (file missing): {self.path}")
+            return
+
+        logger.info(f"Starting WAL replay from {self.path}")
+        records_replayed = 0
+
         with self.path.open("rb") as f:
             f.seek(0, os.SEEK_END)
             file_size = f.tell()
@@ -123,7 +135,10 @@ class WAL:
                 value_end = value_start + value_len
                 value = data[value_start:value_end]
 
+                records_replayed += 1
                 yield (operation_type, key, value, record_offset)
+
+        logger.info(f"WAL replay complete: {records_replayed} record(s)")
 
 
     def truncate_upto(self, offset: int) -> None:
@@ -134,14 +149,19 @@ class WAL:
         """
         with self._lock:
             if offset <= 0 or not self.path.exists():
+                logger.debug(
+                    f"Skipping WAL truncate_upto: offset={offset}, exists={self.path.exists()}"
+                )
                 return
 
             file_size = self.path.stat().st_size
             tmp_path = self.path.with_name(f"{self.path.name}.tmp")
+            logger.info(f"Truncating WAL up to offset {offset} (size={file_size})")
             if offset >= file_size:
                 with self.path.open("wb") as f:
                     f.flush()
                     os.fsync(f.fileno())
+                logger.info("WAL fully truncated (offset reached file end)")
                 return
 
             with self.path.open("rb") as src:
@@ -159,8 +179,12 @@ class WAL:
                 os.fsync(dir_fd)
             finally:
                 os.close(dir_fd)
+            logger.info(
+                f"WAL truncated up to offset {offset}; remaining bytes={self.path.stat().st_size}"
+            )
 
-    def construct_record(self, operationType: int, key: bytes, value: bytes) -> bytearray:
+    @staticmethod
+    def construct_record(operationType: int, key: bytes, value: bytes) -> bytearray:
         """Construct a WALRecord from the given operation.
 
         Args:
@@ -211,6 +235,7 @@ class WAL:
             self.open()
         
         if not keys:
+            logger.debug("append_batch called with empty keys; no-op")
             return self.file.tell()
         
         with self._lock:   
@@ -230,8 +255,11 @@ class WAL:
                 self.file.write(batch_record)
                 self.file.flush()
                 os.fsync(self.file.fileno())
-                logger.info(f"Appended batch to WAL: operation={operation}, num_items={len(keys)}, offset={last_record_offset}")
+                logger.info(
+                    f"Appended WAL batch: operation={operation}, "
+                    f"num_items={len(keys)}, last_offset={last_record_offset}"
+                )
                 return last_record_offset
             except Exception as e:
-                print(f"Error writing batch to WAL: {e}")
+                logger.exception(f"Error writing WAL batch: {e}")
                 raise

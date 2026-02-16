@@ -253,6 +253,75 @@ class DeleteOperation(RequestOperation):
         return DeleteOperation(key)
 
 
+class BatchPutOperation(RequestOperation):
+    """Operation for atomically writing multiple key-value pairs."""
+
+    def __init__(self, keys: list[bytes], values: list[bytes]):
+        """Initialize BATCH_PUT operation.
+
+        Args:
+            keys: List of keys to write.
+            values: List of values to write.
+        """
+        self.keys = keys
+        self.values = values
+
+    def validate(self) -> None:
+        """Validate that keys and values match in length."""
+        if not self.keys or not self.values:
+            raise ValueError("BATCH_PUT requires 'keys' and 'values'")
+        if len(self.keys) != len(self.values):
+            raise ValueError(
+                "BATCH_PUT: 'keys' and 'values' must have same length"
+            )
+
+    def execute(self, storage_engine: StorageEngine) -> Any:
+        """Execute BATCH_PUT operation."""
+        storage_engine.batch_put(self.keys, self.values)
+        return f"OK ({len(self.keys)} items)"
+
+    def to_response(self, result: Any = None, error: Optional[str] = None) -> str:
+        """Format BATCH_PUT response."""
+        response = {
+            "operation": "batch_put",
+            "count": len(self.keys),
+        }
+        if error:
+            response["error"] = error
+        else:
+            response["success"] = True
+            response["value"] = result
+        return json.dumps(response)
+
+    @staticmethod
+    def parse(data: Dict[str, Any]) -> "BatchPutOperation":
+        """Parse BATCH_PUT operation from JSON data.
+
+        Args:
+            data: Parsed JSON dictionary.
+
+        Returns:
+            BatchPutOperation instance.
+
+        Raises:
+            ValueError: If required fields are missing or invalid.
+        """
+        keys = data.get("keys", [])
+        values = data.get("values", [])
+
+        if not keys or not values:
+            raise ValueError("BATCH_PUT requires 'keys' and 'values'")
+        if len(keys) != len(values):
+            raise ValueError(
+                "BATCH_PUT: 'keys' and 'values' must have same length"
+            )
+
+        # Convert all keys and values to bytes
+        keys = [_ensure_bytes(k) for k in keys]
+        values = [_ensure_bytes(v) for v in values]
+
+        return BatchPutOperation(keys, values)
+
 class ReadKeyRangeOperation(RangeRequestOperation):
     """Operation for reading a range of keys."""
 
@@ -358,75 +427,6 @@ class ReadKeyRangeOperation(RangeRequestOperation):
         return ReadKeyRangeOperation(start_key, end_key)
 
 
-class BatchPutOperation(RequestOperation):
-    """Operation for atomically writing multiple key-value pairs."""
-
-    def __init__(self, keys: list[bytes], values: list[bytes]):
-        """Initialize BATCH_PUT operation.
-
-        Args:
-            keys: List of keys to write.
-            values: List of values to write.
-        """
-        self.keys = keys
-        self.values = values
-
-    def validate(self) -> None:
-        """Validate that keys and values match in length."""
-        if not self.keys or not self.values:
-            raise ValueError("BATCH_PUT requires 'keys' and 'values'")
-        if len(self.keys) != len(self.values):
-            raise ValueError(
-                "BATCH_PUT: 'keys' and 'values' must have same length"
-            )
-
-    def execute(self, storage_engine: StorageEngine) -> Any:
-        """Execute BATCH_PUT operation."""
-        storage_engine.batch_put(self.keys, self.values)
-        return f"OK ({len(self.keys)} items)"
-
-    def to_response(self, result: Any = None, error: Optional[str] = None) -> str:
-        """Format BATCH_PUT response."""
-        response = {
-            "operation": "batch_put",
-            "count": len(self.keys),
-        }
-        if error:
-            response["error"] = error
-        else:
-            response["success"] = True
-            response["value"] = result
-        return json.dumps(response)
-
-    @staticmethod
-    def parse(data: Dict[str, Any]) -> "BatchPutOperation":
-        """Parse BATCH_PUT operation from JSON data.
-
-        Args:
-            data: Parsed JSON dictionary.
-
-        Returns:
-            BatchPutOperation instance.
-
-        Raises:
-            ValueError: If required fields are missing or invalid.
-        """
-        keys = data.get("keys", [])
-        values = data.get("values", [])
-
-        if not keys or not values:
-            raise ValueError("BATCH_PUT requires 'keys' and 'values'")
-        if len(keys) != len(values):
-            raise ValueError(
-                "BATCH_PUT: 'keys' and 'values' must have same length"
-            )
-
-        # Convert all keys and values to bytes
-        keys = [_ensure_bytes(k) for k in keys]
-        values = [_ensure_bytes(v) for v in values]
-
-        return BatchPutOperation(keys, values)
-
 
 # Operation type registry using Enum
 class OperationType(Enum):
@@ -439,7 +439,6 @@ class OperationType(Enum):
     DELETE = DeleteOperation
     READ_KEY_RANGE = ReadKeyRangeOperation
     BATCH_PUT = BatchPutOperation
-    # FLUSH = FlushOperation
 
 
 class OperationFactory:

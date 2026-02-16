@@ -1,7 +1,7 @@
 import struct
 import zlib
 
-from logvine.storage.wal import OperationType, WAL
+from src.storage.wal import OperationType, WAL
 
 
 def _decode_records(raw: bytes) -> list[tuple[int, bytes, bytes, int, int]]:
@@ -52,14 +52,14 @@ def test_construct_record_encodes_expected_layout_and_checksum(tmp_path):
     assert checksum == computed
 
 
-def test_append_writes_single_record_and_closes_file(tmp_path):
+def test_append_writes_single_record(tmp_path):
     wal_path = tmp_path / "wal.log"
     wal = WAL(wal_path)
 
     wal.append(OperationType.PUT.value, b"k1", b"v1")
 
     assert wal.file is not None
-    assert wal.file.closed
+    assert not wal.file.closed
 
     raw = wal_path.read_bytes()
     decoded = _decode_records(raw)
@@ -95,15 +95,12 @@ def test_append_appends_multiple_records_in_order(tmp_path):
     assert decoded[1][3] == decoded[1][4]
 
 
-def test_truncate_clears_existing_wal_file(tmp_path):
+def test_truncate_upto_clears_existing_wal_file(tmp_path):
     wal_path = tmp_path / "wal.log"
     wal = WAL(wal_path)
 
     wal.append(OperationType.PUT.value, b"key", b"value")
-
-    wal.open()
-    wal.truncate()
-    wal.close()
+    wal.truncate_upto(wal_path.stat().st_size)
 
     assert wal_path.read_bytes() == b""
 
@@ -115,11 +112,14 @@ def test_replay_returns_operations_in_append_order(tmp_path):
     wal.append(OperationType.DELETE.value, b"k1", b"")
 
     replayed = list(wal.replay())
-    assert replayed == [
+    assert [(op, key, value) for op, key, value, _ in replayed] == [
         (OperationType.PUT.value, b"k1", b"v1"),
         (OperationType.PUT.value, b"k2", b"v2"),
         (OperationType.DELETE.value, b"k1", b""),
     ]
+    offsets = [offset for _, _, _, offset in replayed]
+    assert offsets[0] == 0
+    assert offsets == sorted(offsets)
 
 
 def test_replay_stops_on_corrupt_record_and_returns_valid_prefix(tmp_path):
@@ -133,4 +133,7 @@ def test_replay_stops_on_corrupt_record_and_returns_valid_prefix(tmp_path):
     wal_path.write_bytes(raw)
 
     replayed = list(wal.replay())
-    assert replayed == [(OperationType.PUT.value, b"ok", b"good")]
+    assert [(op, key, value) for op, key, value, _ in replayed] == [
+        (OperationType.PUT.value, b"ok", b"good")
+    ]
+    assert replayed[0][3] == 0

@@ -10,16 +10,16 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 import threading
 from time import time
-from typing import Dict, Iterator, Optional
+from typing import Dict, Iterator
 import asyncio
 
 from src.config import SETTINGS
-from src.storage import sstable
 from src.storage.compaction import CompactionManager
 from src.storage.exceptions import BatchTooLargeException
 from src.storage.manifest import Manifest
 from src.storage.memtable import MemTable
 from src.storage.sstable import SSTable
+from src.storage.sstable_manager import SSTableManager
 from src.storage.wal import WAL, OperationType
 
 logger = logging.getLogger(__name__)
@@ -112,25 +112,18 @@ class LSMStorageEngine(StorageEngine):
         self.manifest = Manifest(self.storage_path / "manifest.json")
         self.manifest.load()
         self.memtable = MemTable(max_size=SETTINGS.memtable_max_size)
+        self.sstable_manager = SSTableManager(self.manifest)
         self.compaction = CompactionManager()
         self.replay_wal()
         logger.info(f"Initialized LSMStorageEngine at {self.storage_path}")
 
-        # For debugging purposes, log the current state of the manifest and memtable after initialization
-        logger.debug(f"MemTable state after initialization: {self.memtable.data}")  
-        logger.debug(f"WAL state after initialization: {self.wal.path} (exists: {self.wal.path.exists()}, size: {self.wal.path.stat().st_size if self.wal.path.exists() else 'N/A'} bytes)")
-        # Log key ranges in bytes of all SSTables in the manifest for debugging
-        for level, sstables in self.manifest.levels.items():
-            for sstable_meta in sstables:
-                logger.debug(f"SSTable {sstable_meta['path']} (level {level}) has key range: {bytes.fromhex(sstable_meta['min_key_hex'])} to {bytes.fromhex(sstable_meta['max_key_hex'])}")
-        
     
     def replay_wal(self) -> None:
         """Replay WAL to restore MemTable state on startup."""
         logger.info("Replaying WAL...")
 
         for operation, key, value, offset in self.wal.replay():
-            logger.info(f"Replaying operation {operation} for key {key}")
+            logger.debug(f"Replaying operation {operation} for key {key}")
             if operation == OperationType.PUT.value:
                 self.memtable.put(key, value)
             elif operation == OperationType.DELETE.value:
@@ -152,47 +145,10 @@ class LSMStorageEngine(StorageEngine):
 
         if self.memtable.is_full():
             self.memtable.rotate()
-
             threading.Thread(target=self.flush).start()  # Flush asynchronously
         
         logger.debug(f"PUT {key} -> {len(value)} bytes")
     
-    def _get_from_sstables(self, key: bytes) -> Optional[bytes]:
-        """Helper method to search for a key in SSTables."""
-        sstable = None
-        for level in sorted(self.manifest.levels.keys()):
-            # traverse SSTables in descending order of creation time (newest first) to find the most recent value
-            for sstable_meta in sorted(self.manifest.levels[level], key=lambda x: x["path"], reverse=True):
-                min_key = bytes.fromhex(sstable_meta["min_key_hex"])
-                max_key = bytes.fromhex(sstable_meta["max_key_hex"])
-                if key < min_key or key > max_key:
-                    logger.info(f"Key {key} is out of range for SSTable {sstable_meta['path']} (level {level}), skipping")
-                    continue  # Key is out of range for this SSTable, skip it 
-                else:  
-                    sstable = SSTable(Path(sstable_meta["path"]))
-                    logger.info(f"Searching for key {key} in SSTable {sstable_meta['path']} (level {level})")
-                    logger.debug(f"min_key: {min_key}, max_key: {max_key}")
-                    return sstable.get(key) if sstable else None
-        
-    
-
-    def _get_overlapping_sstables_for_range(self, start_key: bytes, end_key: bytes) -> list[SSTable]:
-        """Helper method to find all SSTables that overlap with a given key range."""
-        overlapping_sstables = []
-        for level in sorted(self.manifest.levels.keys()):
-            for sstable_meta in self.manifest.levels[level]:
-                min_key = bytes.fromhex(sstable_meta["min_key_hex"])
-                max_key = bytes.fromhex(sstable_meta["max_key_hex"])
-                if end_key < min_key or start_key > max_key:
-                    logger.info(f"Range {start_key}-{end_key} is out of range for SSTable {sstable_meta['path']} (level {level}), skipping")
-                    continue  # Range is out of range for this SSTable, skip it
-                else:
-                    logger.info(f"Range {start_key}-{end_key} overlaps with SSTable {sstable_meta['path']} (level {level}), adding to list")
-                    overlapping_sstables.append(SSTable(Path(sstable_meta["path"])))
-        return overlapping_sstables
-
-
-
     def get(self, key: bytes) -> bytes:
         """Read a value by key.
 
@@ -208,7 +164,7 @@ class LSMStorageEngine(StorageEngine):
         value = self.memtable.get(key)
         if value is None:
             # If not in MemTable, try to find it in SSTables
-            value = self._get_from_sstables(key)
+            value = self.sstable_manager.get(key)
         if not value or value == b"__TOMBSTONE__":
             raise KeyError(key)
         logger.debug(f"GET {key} -> {len(value)} bytes")
@@ -253,8 +209,10 @@ class LSMStorageEngine(StorageEngine):
         last_key = None
 
 
-        # Check overlapping SSTables (if any) since they contain older data than the memtables
-        overlapping_sstables = self._get_overlapping_sstables_for_range(start_key, end_key)
+        # Check overlapping SSTables (if any)
+        overlapping_sstables = self.sstable_manager.get_overlapping_sstables(
+            start_key, end_key
+        )
 
         heap: list[tuple[bytes, int, bytes, Iterator[tuple[bytes, bytes]]]] = []  # (key, sstable_index, value, iterator)
         
@@ -269,15 +227,15 @@ class LSMStorageEngine(StorageEngine):
             it = sstable.range_scan(start_key, end_key)
             key, value = next(it, (None, None))  # Get the first item from each iterator, or (None, None) if it's empty
             
-            if key is not None and key not in memtable_keys:  # Only add to heap if the key is not already in the memtable result, since memtable has newer data
-                heapq.heappush(heap, (key, i, value, it))  # Push the first item from each SSTable iterator onto the heap
+            if key is not None and key not in memtable_keys: 
+                heapq.heappush(heap, (key, i, value, it)) 
             
         while heap:
             key, source_index, value, iterator = heapq.heappop(heap)
             
             # Safety
             if key < start_key:
-                _advance(iterator, source_index)  # Advance the iterator for the source of this key
+                _advance(iterator, source_index)  
                 continue
             
             # Safety
@@ -286,14 +244,14 @@ class LSMStorageEngine(StorageEngine):
 
             if last_key is not None and key == last_key:
                 logger.debug(f"Skipping duplicate key: {key} from source index {source_index}")
-                _advance(iterator, source_index)  # Advance the iterator for the source of this key
+                _advance(iterator, source_index)  
                 continue
             
             if value != b"__TOMBSTONE__":
                 yield key, value
             
             last_key = key
-            _advance(iterator, source_index)  # Advance the iterator for the source of this key
+            _advance(iterator, source_index)  
 
 
 
@@ -329,7 +287,7 @@ class LSMStorageEngine(StorageEngine):
             if input_size > SETTINGS.memtable_max_size:
                 raise BatchTooLargeException(input_size, SETTINGS.memtable_max_size)
                 
-            if self.memtable.current_size + input_size >= self.memtable.max_size:
+            if self.memtable.batch_would_exceed(input_size):
                 self.memtable.rotate()
                 threading.Thread(target=self.flush).start()  # Flush asynchronously
 
@@ -350,29 +308,19 @@ class LSMStorageEngine(StorageEngine):
         try:
             sstable_path = self.storage_path / f"sstable_{int(time()*1000)}.sst"
             sstable = SSTable(sstable_path)
-            asyncio.run(sstable.write(self.memtable.frozen.items()))
-            frozen_keys = sorted(self.memtable.frozen.keys())
+            frozen_items = sorted(self.memtable.get_frozen_items().items())
+            asyncio.run(sstable.write(iter(frozen_items)))
             
-            if not frozen_keys:
+            if not frozen_items:
                 logger.warning("No keys to flush")
                 return
             
-            self.manifest.add_sstable(
-                0,
-                {
-                    "path": str(sstable_path),
-                    "level": 0,
-                    "created_at_ms": int(time() * 1000),
-                    "size_bytes": sstable_path.stat().st_size if sstable_path.exists() else 0,
-                    "entry_count": len(self.memtable.frozen),
-                    "min_key_hex": frozen_keys[0].hex(),
-                    "max_key_hex": frozen_keys[-1].hex(),
-                }
-            )
+            sstable_metadata = self.sstable_manager.build_metadata(sstable, level=0)
+            self.manifest.add_sstable(0, sstable_metadata)
             self.memtable.clearFrozen()
             self.manifest.save()
             
-            self.wal.truncate_upto(self.memtable.max_wal_offset_frozen)        
+            self.wal.truncate_upto(self.memtable.get_max_wal_offset_frozen())        
             logger.info(f"Flushed MemTable to {sstable_path}")
 
             self.compaction.may_start_compaction(self.manifest, self.storage_path)

@@ -4,12 +4,13 @@ Immutable, sorted key-value store written to disk. Multiple SSTables
 form the levels of the LSM tree.
 """
 
-from asyncio.log import logger
+import logging
 import os
 from pathlib import Path
 import struct
 from typing import Iterator, Optional, Tuple
 
+logger = logging.getLogger(__name__)
 
 class SSTable:
     """Immutable sorted key-value store on disk."""
@@ -24,6 +25,7 @@ class SSTable:
         self.path = path
         self.level = level
         self.index = {}  # key -> file offset for binary search
+        logger.debug(f"Initialized SSTable path={path}, level={level}")
     
 
     async def write(self, key_value_pairs: Iterator[Tuple[bytes, bytes]]) -> None:
@@ -32,9 +34,10 @@ class SSTable:
         Args:
             key_value_pairs: Iterator of (key, value) tuples in sorted order.
         """
-        logger.info(f"Writing SSTable to {self.path}")
+        logger.info(f"Writing SSTable to {self.path} (level={self.level})")
 
         index = {}
+        entry_count = 0
 
         try:
             if not self.path.parent.exists():
@@ -42,7 +45,9 @@ class SSTable:
             with self.path.open("wb") as f:
                 for key, value in key_value_pairs:
                     offset = f.tell()
-                    index[key] = offset
+                    # ToDo: Make this a sparse index in future
+                    index[key] = offset 
+                    entry_count += 1
 
                     f.write(struct.pack(">I", len(key)))
                     f.write(key)
@@ -65,18 +70,23 @@ class SSTable:
                 self.index = index
 
         except Exception as e:
-            logger.error(f"Error writing SSTable: {e}")
+            logger.exception(f"Error writing SSTable: {self.path}")
             if self.path.exists():
+                logger.warning(f"Removing incomplete SSTable file: {self.path}")
                 self.path.unlink()  # Remove incomplete SSTable file
             raise e
 
-        logger.info(f"Finished writing SSTable to {self.path}, size: {self.path.stat().st_size} bytes")
+        logger.info(
+            f"Finished writing SSTable to {self.path}, size={self.path.stat().st_size} bytes, "
+            f"entries={entry_count}"
+        )
 
 
     def _load_index(self) -> None:
         """Load the index from disk into memory."""
         if not self.path.exists():
             self.index = {}
+            logger.debug(f"SSTable index load skipped; file missing: {self.path}")
             return
 
         try:
@@ -96,8 +106,11 @@ class SSTable:
                     key = f.read(key_len)
                     offset = struct.unpack(">Q", f.read(8))[0]
                     self.index[key] = offset
+            logger.debug(
+                f"Loaded SSTable index for {self.path}: {len(self.index)} keys"
+            )
         except Exception as e:
-            logger.error(f"Error loading SSTable index: {e}")
+            logger.exception(f"Error loading SSTable index: {self.path}")
             self.index = {}
 
 
@@ -115,9 +128,9 @@ class SSTable:
             
         offset = self.index.get(key)
         if offset is None:
-            logger.debug(f"Key not found in SSTable index: {key}")  
-            logger.debug(f"SSTable index keys: {[k for k in self.index.keys()]}")
+            logger.debug(f"Key not found in SSTable index: {key}")
             return None
+        logger.debug(f"SSTable get key hit: key={key}, offset={offset}, file={self.path}")
         with self.path.open("rb") as f:
             f.seek(offset)
             key_len = struct.unpack(">I", f.read(4))[0]
@@ -141,6 +154,9 @@ class SSTable:
         """
         if not self.index:
             self._load_index()
+        logger.debug(
+            f"SSTable range_scan start={start_key}, end={end_key}, file={self.path}"
+        )
     
         for key in sorted(self.index.keys()):
             if start_key <= key <= end_key:
@@ -154,63 +170,8 @@ class SSTable:
         """Get an iterator of all key-value pairs in the SSTable."""
         if not self.index:
             self._load_index()
+        logger.debug(f"SSTable iter_items on file={self.path}, keys={len(self.index)}")
         for key in sorted(self.index.keys()):
             value = self.get(key)
             if value is not None:
                 yield (key, value)
-
-    # def overlaps(self, other: "SSTable") -> bool:
-    #     """Check if key ranges overlap with another SSTable.
-
-    #     Args:
-    #         other: The other SSTable to compare with.
-
-    #     Returns:
-    #         True if key ranges overlap, False otherwise.
-    #     """
-    #     if not self.index:
-    #         self._load_index()
-    #     if not other.index:
-    #         other._load_index()
-
-    #     if not self.index or not other.index:
-    #         return False  # No keys means no overlap
-
-    #     self_min = min(self.index.keys())
-    #     self_max = max(self.index.keys())
-    #     other_min = min(other.index.keys())
-    #     other_max = max(other.index.keys())
-
-    #     return not (self_max < other_min or self_min > other_max)
-    
-
-    # def compact_with(self, other: "SSTable", output_path: Path) -> "SSTable":
-    #     """Compact this SSTable with another into a new SSTable.
-
-    #     Args:
-    #         other: The other SSTable to compact with.
-    #         output_path: Path for the new compacted SSTable.
-
-    #     Returns:
-    #         A new SSTable instance representing the compacted result.
-    #     """
-    #     if not self.index:
-    #         self._load_index()
-    #     if not other.index:
-    #         other._load_index()
-
-    #     merged_data = {}
-    #     for key in sorted(set(self.index.keys()) | set(other.index.keys())):
-    #         value_self = self.get(key)
-    #         value_other = other.get(key)
-
-    #         if value_self is not None and value_other is not None:
-    #             merged_data[key] = value_other  # Prefer newer value
-    #         elif value_self is not None:
-    #             merged_data[key] = value_self
-    #         elif value_other is not None:
-    #             merged_data[key] = value_other
-
-    #     new_sstable = SSTable(output_path, level=max(self.level, other.level) + 1)
-    #     new_sstable.write(iter(merged_data.items()))
-    #     return new_sstable
