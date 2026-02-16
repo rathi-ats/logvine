@@ -5,6 +5,7 @@ Handles incoming connections, request parsing, and response transmission.
 """
 
 import asyncio
+import argparse
 import logging
 import os   
 from typing import Optional
@@ -21,7 +22,7 @@ class LogvineServer:
         self,
         controller: Controller,
         host: str = "127.0.0.1",
-        port: int = 9000,
+        port: int = 9999,
     ):
         """Initialize the server.
 
@@ -99,7 +100,7 @@ class LogvineServer:
 async def run_server(
     storage_path: str,
     host: str = "127.0.0.1",
-    port: int = 9000,
+    port: int = 9999,
     node_id: Optional[int] = None,
     num_nodes: int = 1,
 ) -> None:
@@ -133,7 +134,12 @@ async def run_server(
 
 
 if __name__ == "__main__":
-    import sys
+    parser = argparse.ArgumentParser(description="Run the logvine server")
+    parser.add_argument("storage_path", nargs="?", default="/tmp/logvine")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=9999)
+    args = parser.parse_args()
 
-    storage_path = sys.argv[1] if len(sys.argv) > 1 else "/tmp/logvine"
-    asyncio.run(run_server(storage_path))
+    asyncio.run(
+        run_server(storage_path=args.storage_path, host=args.host, port=args.port)
+    )

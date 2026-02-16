@@ -6,7 +6,7 @@ before they are flushed to disk as SSTables.
 
 import logging
 import threading
-from typing import Optional
+from typing import Dict, Optional
 
 
 logger = logging.getLogger(__name__)
@@ -26,8 +26,8 @@ class MemTable:
             max_size: Maximum size in bytes before triggering a flush.
         """
         self.max_size = max_size
-        self._data: dict[bytes, bytes] = {}
-        self._frozen: dict[bytes, bytes] = {}
+        self._data: Dict[bytes, bytes] = {}
+        self._frozen: Dict[bytes, bytes] = {}
         self._current_size = 0
         self._max_wal_offset = 0
         self._max_wal_offset_frozen = 0
@@ -177,7 +177,7 @@ class MemTable:
             self._release_read()
         logger.info(f"Cleared frozen MemTable entries: count={frozen_count}")
     
-    def get_range(self, start_key: bytes, end_key: bytes) -> dict[bytes, bytes]:
+    def get_range(self, start_key: bytes, end_key: bytes) -> Dict[bytes, bytes]:
         """Retrieve all key-value pairs in a key range.
 
         Args:
@@ -217,7 +217,7 @@ class MemTable:
         )
         return would_exceed
 
-    def get_frozen_items(self) -> dict[bytes, bytes]:
+    def get_frozen_items(self) -> Dict[bytes, bytes]:
         return self._frozen
     
     def get_max_wal_offset_frozen(self):

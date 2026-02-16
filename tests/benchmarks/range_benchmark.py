@@ -1,6 +1,6 @@
 import random
-from benchmark_runner import BenchmarkRunner 
-from src.storage.engine import StorageEngine, LSMStorageEngine 
+from tests.benchmarks.benchmark_runner import BenchmarkRunner
+from src.storage.engine import StorageEngine, LSMStorageEngine
 
 
 NUM_KEYS = 400_000

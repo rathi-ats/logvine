@@ -47,6 +47,31 @@ tests/
 
 - Python `>=3.9`
 
+## Environment Setup
+
+If your system Python is below the required version, upgrade first (example using `pyenv`):
+
+```bash
+pyenv install 3.11.11
+pyenv local 3.11.11
+python3 --version
+```
+
+Create and activate a virtual environment with a supported Python version:
+
+```bash
+python3 --version
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+```
+
+Install dependencies:
+
+```bash
+pip install -e .
+```
+
 ## Configuration
 
 Central runtime settings live in `src/config.py` and are controlled by env vars:
@@ -68,29 +93,28 @@ export LOGVINE_MAX_WORKERS=16
 ## Running the Server
 
 ```bash
-python3 src/server.py /tmp/logvine
+python -m src.server /tmp/logvine --host 127.0.0.1 --port 9999
 ```
 
 Defaults:
 
 - Host: `127.0.0.1`
-- Port: `9000`
+- Port: `9999`
 
 ## Client and Demo
 
 `src/client.py` provides `LogvineClient`, an async TCP client with support for streaming `read_key_range` responses.
-Note: client/demo default port is `9999`, so pass `--port 9000` when using server defaults.
 
 Run demo mode:
 
 ```bash
-python3 src/demo.py --mode demo --host 127.0.0.1 --port 9000
+python -m src.demo --mode demo --host 127.0.0.1 --port 9999
 ```
 
 Run concurrent write-then-read simulation:
 
 ```bash
-python3 src/demo.py --mode concurrent --host 127.0.0.1 --port 9000 \
+python -m src.demo --mode concurrent --host 127.0.0.1 --port 9999 \
   --writers 8 --readers 8 --write-ops 200 --read-ops 200 --keyspace 500
 ```
 
@@ -140,7 +164,7 @@ Run examples:
 python3 tests/benchmarks/write_benchmark.py
 python3 tests/benchmarks/mixed_rw_benchmark.py
 python3 tests/benchmarks/point_get_benchmark.py
-cd tests/benchmarks && python3 range_benchmark.py
+python3 tests/benchmarks/range_benchmark.py
 ```
 
 These scripts are exploratory and intended for local performance investigation (not CI pass/fail gates).
