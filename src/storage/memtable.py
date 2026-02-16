@@ -18,7 +18,7 @@ class MemTable:
     - Writes are exclusive (blocks reads and other writes)
     """
 
-    def __init__(self, max_size: int = 1_0):
+    def __init__(self, max_size: int = 1_000_000):
         """Initialize the MemTable.
         Args:
             max_size: Maximum size in bytes before triggering a flush.
@@ -60,7 +60,7 @@ class MemTable:
         self._write_lock.release()
 
     def set_max_wal_offset(self, offset: int) -> None:
-        """Set the maximum WAL offset that has been flushed to disk."""
+        """Set the maximum WAL offset that has been fsynced to wal"""
         self._acquire_write()
         self.max_wal_offset = max(self.max_wal_offset, offset)
         self._release_write()
@@ -159,7 +159,7 @@ class MemTable:
         finally:
             self._release_read()
     
-    def get_range(self, start_key: bytes, end_key: bytes) -> dict:
+    def get_range(self, start_key: bytes, end_key: bytes) -> dict[bytes, bytes]:
         """Retrieve all key-value pairs in a key range.
 
         Args:
@@ -189,4 +189,3 @@ class MemTable:
             return {}    
         finally:
             self._release_read()
-

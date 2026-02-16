@@ -9,7 +9,7 @@ import logging
 import os   
 from typing import Optional
 
-from logvine.controller import Controller
+from src.controller import Controller
 
 logger = logging.getLogger(__name__)
 
@@ -61,12 +61,7 @@ class LogvineServer:
                     logger.debug(f"Received request: {request_line}")
 
                     # Process request through controller
-                    response = await self.controller.handle_request(request_line)
-
-                    # Send response
-                    writer.write(response.encode() + b"\n")
-                    await writer.drain()
-                    logger.debug(f"Sent response: {response}")
+                    await self.controller.handle_request(request_line, writer)
 
                 except Exception as e:
                     logger.error(f"Error processing request: {e}")

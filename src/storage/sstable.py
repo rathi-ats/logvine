@@ -34,13 +34,15 @@ class SSTable:
         """
         logger.info(f"Writing SSTable to {self.path}")
 
+        index = {}
+
         try:
             if not self.path.parent.exists():
                 self.path.parent.mkdir(parents=True, exist_ok=True)
             with self.path.open("wb") as f:
-                for key, value in iter(key_value_pairs):
+                for key, value in key_value_pairs:
                     offset = f.tell()
-                    self.index[key] = offset
+                    index[key] = offset
 
                     f.write(struct.pack(">I", len(key)))
                     f.write(key)
@@ -50,7 +52,7 @@ class SSTable:
                 index_offset = f.tell()
 
                 # write index
-                for key, offset in self.index.items():
+                for key, offset in index.items():
                     f.write(struct.pack(">I", len(key)))
                     f.write(key)
                     f.write(struct.pack(">Q", offset))  # 8-byte offset
@@ -60,6 +62,7 @@ class SSTable:
 
                 f.flush()
                 os.fsync(f.fileno())
+                self.index = index
 
         except Exception as e:
             logger.error(f"Error writing SSTable: {e}")
@@ -126,7 +129,7 @@ class SSTable:
 
     def range_scan(
         self, start_key: bytes, end_key: bytes
-    ) -> dict[bytes, bytes]:
+    ) -> Iterator[Tuple[bytes, bytes]]:
         """Scan for all keys in a range.
 
         Args:
@@ -138,16 +141,14 @@ class SSTable:
         """
         if not self.index:
             self._load_index()
-        
-        results = {}
+    
         for key in sorted(self.index.keys()):
             if start_key <= key <= end_key:
                 value = self.get(key)
                 if value is not None:
-                    results[key] = value
+                    yield key, value
             elif key > end_key:
                 break  # Since keys are sorted, we can stop once we pass end_key
-        return results
     
     def iter_items(self) -> Iterator[tuple[bytes, bytes]]:
         """Get an iterator of all key-value pairs in the SSTable."""

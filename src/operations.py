@@ -10,7 +10,7 @@ from abc import ABC, abstractmethod
 from enum import Enum
 from typing import Any, Dict, Optional
 
-from logvine.storage.engine import StorageEngine
+from src.storage.engine import StorageEngine
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +71,15 @@ class RequestOperation(ABC):
         """
         pass
 
+class RangeRequestOperation(RequestOperation):
+    @abstractmethod
+    def to_stream_response(self, items): ...
+
+    @abstractmethod
+    def to_stream_done(self): ...
+
+    @abstractmethod
+    def to_stream_error(self, error): ...
 
 class PutOperation(RequestOperation):
     """Operation for writing a key-value pair."""
@@ -244,7 +253,7 @@ class DeleteOperation(RequestOperation):
         return DeleteOperation(key)
 
 
-class ReadKeyRangeOperation(RequestOperation):
+class ReadKeyRangeOperation(RangeRequestOperation):
     """Operation for reading a range of keys."""
 
     def __init__(self, start_key: bytes, end_key: bytes):
@@ -289,6 +298,41 @@ class ReadKeyRangeOperation(RequestOperation):
             else:
                 response["results"] = result
         return json.dumps(response)
+    
+    def to_stream_response(self, items, chunk_id):
+        response = {
+            "operation": "read_key_range",
+            "start_key": self.start_key.decode("utf-8", errors="replace"),
+            "end_key": self.end_key.decode("utf-8", errors="replace"),
+            "status": "ok",
+            "stream_status": "in_progress",
+            "chunk_id":  chunk_id,
+            "items": items
+        }
+
+        return json.dumps(response)
+
+    def to_stream_done(self):
+        response = {
+            "operation": "read_key_range",
+            "start_key": self.start_key.decode("utf-8", errors="replace"),
+            "end_key": self.end_key.decode("utf-8", errors="replace"),
+            "status": "ok",
+            "stream_status": "done"
+        }
+        return json.dumps(response)
+
+    def to_stream_error(self, error):
+        response = {
+            "operation": "read_key_range",
+            "start_key": self.start_key.decode("utf-8", errors="replace"),
+            "end_key": self.end_key.decode("utf-8", errors="replace"),
+            "error": error,
+            "stream_status": "terminated"
+
+        }
+        return json.dumps(response)
+    
 
     @staticmethod
     def parse(data: Dict[str, Any]) -> "ReadKeyRangeOperation":
@@ -382,41 +426,6 @@ class BatchPutOperation(RequestOperation):
         values = [_ensure_bytes(v) for v in values]
 
         return BatchPutOperation(keys, values)
-
-
-# class FlushOperation(RequestOperation):
-#     """Operation for flushing MemTable to SSTable."""
-
-#     def validate(self) -> None:
-#         """No validation needed for FLUSH operation."""
-#         pass
-
-#     def execute(self, controller: "Controller") -> Any:
-#         """Execute FLUSH operation."""
-#         controller.flush()
-#         return "OK"
-
-#     def to_response(self, result: Any = None, error: Optional[str] = None) -> str:
-#         """Format FLUSH response."""
-#         response = {"operation": "flush"}
-#         if error:
-#             response["error"] = error
-#         else:
-#             response["success"] = True
-#             response["value"] = result
-#         return json.dumps(response)
-
-#     @staticmethod
-#     def parse(data: Dict[str, Any]) -> "FlushOperation":
-#         """Parse FLUSH operation from JSON data.
-
-#         Args:
-#             data: Parsed JSON dictionary.
-
-#         Returns:
-#             FlushOperation instance.
-#         """
-#         return FlushOperation()
 
 
 # Operation type registry using Enum

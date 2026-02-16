@@ -4,20 +4,23 @@ Manages interactions between MemTable, WAL, SSTables, and Manifest
 to provide a unified storage interface.
 """
 
+import heapq
 import logging
 from abc import ABC, abstractmethod
 from pathlib import Path
 import threading
 from time import time
-from typing import Dict, Optional
+from typing import Dict, Iterator, Optional
 import asyncio
 
-from logvine.storage import sstable
-from logvine.storage.compaction import CompactionManager
-from logvine.storage.manifest import Manifest
-from logvine.storage.memtable import MemTable
-from logvine.storage.sstable import SSTable
-from logvine.storage.wal import WAL, OperationType
+from src.config import SETTINGS
+from src.storage import sstable
+from src.storage.compaction import CompactionManager
+from src.storage.exceptions import BatchTooLargeException
+from src.storage.manifest import Manifest
+from src.storage.memtable import MemTable
+from src.storage.sstable import SSTable
+from src.storage.wal import WAL, OperationType
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +111,7 @@ class LSMStorageEngine(StorageEngine):
         self.wal = WAL(self.storage_path / "wal.log")
         self.manifest = Manifest(self.storage_path / "manifest.json")
         self.manifest.load()
-        self.memtable = MemTable()
+        self.memtable = MemTable(max_size=SETTINGS.memtable_max_size)
         self.compaction = CompactionManager()
         self.replay_wal()
         logger.info(f"Initialized LSMStorageEngine at {self.storage_path}")
@@ -125,12 +128,14 @@ class LSMStorageEngine(StorageEngine):
     def replay_wal(self) -> None:
         """Replay WAL to restore MemTable state on startup."""
         logger.info("Replaying WAL...")
-        for operation, key, value in self.wal.replay():
+
+        for operation, key, value, offset in self.wal.replay():
             logger.info(f"Replaying operation {operation} for key {key}")
             if operation == OperationType.PUT.value:
                 self.memtable.put(key, value)
             elif operation == OperationType.DELETE.value:
                 self.memtable.delete(key)
+            self.memtable.set_max_wal_offset(offset)
         logger.info("WAL replay complete.")
 
     def put(self, key: bytes, value: bytes) -> None:
@@ -220,7 +225,7 @@ class LSMStorageEngine(StorageEngine):
         self.memtable.set_max_wal_offset(offset)
         logger.debug(f"DELETE {key}")
 
-    def read_key_range(self, start_key: bytes, end_key: bytes) -> Dict[bytes, bytes]:
+    def read_key_range(self, start_key: bytes, end_key: bytes) -> Iterator[tuple[bytes, bytes]]:
         """Read all key-value pairs in a range.
 
         Args:
@@ -228,30 +233,71 @@ class LSMStorageEngine(StorageEngine):
             end_key: Exclusive end of the range.
 
         Returns:
-            Dictionary of key-value pairs in the range.
+            Iterator of key-value pairs in the range.
         """
-        result = {}
 
-        # First check SSTables since they contain the oldest data, 
-        # then frozen MemTable, and finally the active MemTable to 
-        # ensure we return the most recent value for each key in the range
+        def _advance(iterator, index):
+            try:
+                while True:
+                    k, v = next(iterator)
+                    if index != -1 and k in memtable_keys:
+                        continue
+                    heapq.heappush(heap, (k, index, v, iterator))
+                    return
+            except StopIteration:
+                pass
+
+        memtable_result = self.memtable.get_range(start_key, end_key)
+        memtable_keys = set(memtable_result.keys())
+        memtable_items = sorted(memtable_result.items())
+        last_key = None
 
 
         # Check overlapping SSTables (if any) since they contain older data than the memtables
         overlapping_sstables = self._get_overlapping_sstables_for_range(start_key, end_key)
-        for sstable in sorted(overlapping_sstables, key=lambda s: s.path):
-            for key, value in sstable.range_scan(start_key, end_key).items():
-                if value != b"__TOMBSTONE__":
-                    result[key] = value
 
-        # Next check frozen and active memtable since they contain the most recent data that 
-        # hasn't been flushed to SSTable yet
-        memtable_result = self.memtable.get_range(start_key, end_key)
-        for key, value in memtable_result.items():
+        heap: list[tuple[bytes, int, bytes, Iterator[tuple[bytes, bytes]]]] = []  # (key, sstable_index, value, iterator)
+        
+        memtable_iter = iter(memtable_items)
+        memtable_record = next(memtable_iter, (None, None))  # Get the first item from the memtable result, or (None, None) if it's empty
+        
+        if memtable_record[0] is not None:
+         # Get the first item from the memtable result, or (None, None) if it's empty
+            heapq.heappush(heap, (memtable_record[0], -1, memtable_record[1], memtable_iter))  # Use index -1 for memtable to prioritize it over SSTables        
+        
+        for i, sstable in enumerate(sorted(overlapping_sstables, key=lambda s: s.path, reverse=True)):  # Sort SSTables by path in reverse order to prioritize newer SSTables
+            it = sstable.range_scan(start_key, end_key)
+            key, value = next(it, (None, None))  # Get the first item from each iterator, or (None, None) if it's empty
+            
+            if key is not None and key not in memtable_keys:  # Only add to heap if the key is not already in the memtable result, since memtable has newer data
+                heapq.heappush(heap, (key, i, value, it))  # Push the first item from each SSTable iterator onto the heap
+            
+        while heap:
+            key, source_index, value, iterator = heapq.heappop(heap)
+            
+            # Safety
+            if key < start_key:
+                _advance(iterator, source_index)  # Advance the iterator for the source of this key
+                continue
+            
+            # Safety
+            if key >= end_key:
+                break
+
+            if last_key is not None and key == last_key:
+                logger.debug(f"Skipping duplicate key: {key} from source index {source_index}")
+                _advance(iterator, source_index)  # Advance the iterator for the source of this key
+                continue
+            
             if value != b"__TOMBSTONE__":
-                result[key] = value 
+                yield key, value
+            
+            last_key = key
+            _advance(iterator, source_index)  # Advance the iterator for the source of this key
 
-        return result
+
+
+
 
     def batch_put(self, keys: list[bytes], values: list[bytes]) -> None:
         """Write multiple key-value pairs atomically.
@@ -266,18 +312,36 @@ class LSMStorageEngine(StorageEngine):
         if len(keys) != len(values):
             raise ValueError("keys and values must have the same length")
         
+        # Compute size of incoming data 
+        input_size = 0
+        ENTRY_OVERHEAD = 64
+        
         try:
+            last_record_offset = self.wal.append_batch(OperationType.PUT.value, keys, values)
+
             for key, value in zip(keys, values):
-                offset = self.wal.append(OperationType.PUT.value, key, value)
+                prev = self.memtable.get(key)
+                if prev:
+                    input_size = input_size + len(value) + ENTRY_OVERHEAD - len(prev)
+                else:
+                    input_size = input_size + len(value) + ENTRY_OVERHEAD + len(key)
+            
+            if input_size > SETTINGS.memtable_max_size:
+                raise BatchTooLargeException(input_size, SETTINGS.memtable_max_size)
+                
+            if self.memtable.current_size + input_size >= self.memtable.max_size:
+                self.memtable.rotate()
+                threading.Thread(target=self.flush).start()  # Flush asynchronously
+
+            for key, value in zip(keys, values):
                 self.memtable.put(key, value)
-                self.memtable.set_max_wal_offset(offset)
+
+            self.memtable.set_max_wal_offset(last_record_offset)
+
             logger.info(f"BATCH_PUT {len(keys)} items")
         except Exception as e:
             logger.error(f"Error in batch_put: {e}")
         
-        if self.memtable.is_full():
-            self.memtable.rotate()
-            threading.Thread(target=self.flush).start()  # Flush asynchronously
 
     def flush(self) -> None:
         """Flush MemTable to disk."""
