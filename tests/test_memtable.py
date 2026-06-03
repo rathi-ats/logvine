@@ -35,10 +35,11 @@ def test_rotate_moves_data_to_frozen_and_resets_active_state():
     memtable.rotate()
 
     assert memtable._data == {}
-    assert memtable._frozen == {b"a": b"1", b"b": b"2"}
+    assert len(memtable._frozen_queue) == 1
+    assert memtable._frozen_queue[0][0] == {b"a": b"1", b"b": b"2"}
+    assert memtable._frozen_queue[0][1] == 123
     assert memtable._current_size == 0
     assert memtable._max_wal_offset == 0
-    assert memtable._max_wal_offset_frozen == 123
     assert memtable.get(b"a") == b"1"
 
 
@@ -47,13 +48,13 @@ def test_clear_frozen_removes_frozen_data():
     memtable.put(b"a", b"1")
     memtable.rotate()
 
-    memtable.clearFrozen()
+    memtable.clear_frozen()
 
-    assert memtable._frozen == {}
+    assert memtable._frozen_queue == []
     assert memtable.get(b"a") is None
 
 
-def test_get_range_returns_inclusive_sorted_results_with_active_overrides():
+def test_get_range_returns_exclusive_end_sorted_results_with_active_overrides():
     memtable = MemTable(max_size=100)
     memtable.put(b"a", b"old-a")
     memtable.put(b"b", b"old-b")
@@ -64,10 +65,9 @@ def test_get_range_returns_inclusive_sorted_results_with_active_overrides():
     memtable.put(b"d", b"new-d")
 
     result = memtable.get_range(b"a", b"c")
-    assert list(result.keys()) == [b"a", b"b", b"c"]
+    assert list(result.keys()) == [b"a", b"b"]
     assert result[b"a"] == b"old-a"
     assert result[b"b"] == b"new-b"
-    assert result[b"c"] == b"old-c"
 
 
 def test_iter_sorted_returns_all_entries_in_key_order():

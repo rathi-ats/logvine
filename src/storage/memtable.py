@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 class MemTable:
     """In-memory sorted map for buffering recent writes.
-    
+
     Thread-safe with read-write locking:
     - Multiple reads can occur concurrently
     - Writes are exclusive (blocks reads and other writes)
@@ -27,11 +27,11 @@ class MemTable:
         """
         self.max_size = max_size
         self._data: Dict[bytes, bytes] = {}
-        self._frozen: Dict[bytes, bytes] = {}
+        # Queue of (frozen_data, wal_offset) tuples to handle concurrent flushes
+        self._frozen_queue: list[tuple[Dict[bytes, bytes], int]] = []
         self._current_size = 0
         self._max_wal_offset = 0
-        self._max_wal_offset_frozen = 0
-        
+
         # Read-write lock for concurrency control
         self._read_lock = threading.Lock()
         self._write_lock = threading.Lock()
@@ -81,16 +81,25 @@ class MemTable:
         """
         self._acquire_write()
         try:
-            if key in self._data:
-                self._current_size -= len(self._data[key])
-
-            self._data[key] = value
-            self._current_size += len(value)
+            self._put_unlocked(key, value)
         finally:
             self._release_write()
         logger.debug(
             f"MemTable put key={key!r}, value_size={len(value)}, current_size={self._current_size}"
         )
+
+    def _put_unlocked(self, key: bytes, value: bytes) -> None:
+        """Insert or update a key-value pair (caller must hold write lock).
+
+        Args:
+            key: The key to insert (bytes).
+            value: The value to insert (bytes).
+        """
+        if key in self._data:
+            self._current_size -= len(self._data[key])
+
+        self._data[key] = value
+        self._current_size += len(value)
 
     def get(self, key: bytes) -> Optional[bytes]:
         """Retrieve a value by key.
@@ -103,10 +112,13 @@ class MemTable:
         """
         self._acquire_read()
         try:
+            # Check active data first (most recent)
             if key in self._data:
                 return self._data.get(key)
-            elif key in self._frozen:
-                return self._frozen.get(key)
+            # Check frozen queue from newest to oldest
+            for frozen_data, _ in reversed(self._frozen_queue):
+                if key in frozen_data:
+                    return frozen_data.get(key)
         finally:
             self._release_read()
 
@@ -133,50 +145,62 @@ class MemTable:
 
         Yields:
             Tuple of (key, value) in sorted key order.
-        # """
+        """
         self._acquire_read()
         try:
             # Create a snapshot to iterate safely
             items = [(key, self._data[key]) for key in sorted(self._data.keys())]
-            items += [(key, self._frozen[key]) for key in sorted(self._frozen.keys())]
+            # Add items from frozen queue (oldest to newest)
+            for frozen_data, _ in self._frozen_queue:
+                items += [(key, frozen_data[key]) for key in sorted(frozen_data.keys())]
             items.sort(key=lambda x: x[0])  # Sort by key
         finally:
             self._release_read()
-        
+
         for key, value in items:
             yield key, value
 
     def rotate(self):
-        """Copy the current data to frozen and clear the active data for new writes.
+        """Copy the current data to frozen queue and clear the active data for new writes.
 
-        Returns:
-            A dictionary of key-value pairs to be flushed.
+        The frozen data is added to a queue so that multiple concurrent rotates
+        don't overwrite each other. Each flush will process the oldest frozen entry.
         """
         self._acquire_write()
         try:
-            frozen_count = len(self._data)
-            self._frozen = self._data.copy()
-            self._data.clear()
-            self._current_size = 0
-            self._max_wal_offset_frozen = self._max_wal_offset
-            self._max_wal_offset = 0
+            self._rotate_unlocked()
         finally:
             self._release_write()
+
+    def _rotate_unlocked(self):
+        """Rotate without acquiring lock (caller must hold write lock)."""
+        frozen_count = len(self._data)
+        # Append (data, wal_offset) to queue instead of overwriting single _frozen
+        self._frozen_queue.append((self._data.copy(), self._max_wal_offset))
+        self._data.clear()
+        self._current_size = 0
+        self._max_wal_offset = 0
         logger.info(
             f"Rotated MemTable: frozen_count={frozen_count}, "
-            f"max_wal_offset_frozen={self._max_wal_offset_frozen}"
+            f"queue_depth={len(self._frozen_queue)}"
         )
-    
-    def clearFrozen(self):
-        """Clear the frozen data after it has been flushed to disk."""
-        self._acquire_read()
+
+    def clear_frozen(self):
+        """Remove the oldest frozen buffer from the queue after it has been flushed to disk.
+
+        This is called after a flush completes successfully.
+        """
+        self._acquire_write()
         try:
-            frozen_count = len(self._frozen)
-            self._frozen.clear()
+            if self._frozen_queue:
+                frozen_data, _ = self._frozen_queue.pop(0)
+                frozen_count = len(frozen_data)
+            else:
+                frozen_count = 0
         finally:
-            self._release_read()
-        logger.info(f"Cleared frozen MemTable entries: count={frozen_count}")
-    
+            self._release_write()
+        logger.info(f"Cleared oldest frozen MemTable buffer: count={frozen_count}, remaining_in_queue={len(self._frozen_queue)}")
+
     def get_range(self, start_key: bytes, end_key: bytes) -> Dict[bytes, bytes]:
         """Retrieve all key-value pairs in a key range.
 
@@ -190,24 +214,27 @@ class MemTable:
         self._acquire_read()
         try:
             result = {}
-            for key in sorted(self._frozen.keys()):
-                if key > end_key:
-                    break
-                if start_key <= key <= end_key:
-                    result[key] = self._frozen[key]
+            # Check frozen queue (oldest to newest, but override with newer)
+            for frozen_data, _ in self._frozen_queue:
+                for key in sorted(frozen_data.keys()):
+                    if key >= end_key:
+                        break
+                    if start_key <= key < end_key:
+                        result[key] = frozen_data[key]
+            # Active data (most recent) overrides frozen
             for key in sorted(self._data.keys()):
-                if key > end_key:
+                if key >= end_key:
                     break
-                if start_key <= key <= end_key:
+                if start_key <= key < end_key:
                     result[key] = self._data[key]
             logger.info(f"Found {len(result)} keys in range from MemTable")
             return result
         except Exception as e:
             logger.exception("Error in MemTable get_range")
-            return {}    
+            return {}
         finally:
             self._release_read()
-    
+
 
     def batch_would_exceed(self, batch_size: int) -> bool:
         would_exceed = self._current_size + batch_size >= self.max_size
@@ -218,7 +245,29 @@ class MemTable:
         return would_exceed
 
     def get_frozen_items(self) -> Dict[bytes, bytes]:
-        return self._frozen
-    
-    def get_max_wal_offset_frozen(self):
-        return self._max_wal_offset_frozen
+        """Get the oldest frozen buffer for flushing.
+
+        Returns:
+            Dictionary of frozen key-value pairs, or empty dict if no frozen data.
+        """
+        if self._frozen_queue:
+            return self._frozen_queue[0][0]
+        return {}
+
+    def get_max_wal_offset_frozen(self) -> int:
+        """Get the WAL offset of the oldest frozen buffer.
+
+        Returns:
+            The WAL offset, or 0 if no frozen data.
+        """
+        if self._frozen_queue:
+            return self._frozen_queue[0][1]
+        return 0
+
+    def get_frozen_queue_depth(self) -> int:
+        """Get the number of frozen buffers waiting to be flushed.
+
+        Returns:
+            The depth of the frozen queue.
+        """
+        return len(self._frozen_queue)
