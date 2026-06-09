@@ -3,7 +3,7 @@ import heapq
 import logging
 from pathlib import Path
 import threading
-from time import time
+from time import time_ns
 from typing import Iterator
 
 from src.storage.manifest import Manifest
@@ -123,7 +123,7 @@ class CompactionManager:
             logger.info(f"Compacting {len(level0_sstables)} SSTable(s) from level 0")
             
             # For simplicity, we will just merge all level 0 SSTables into one new SSTable
-            new_sstable_path = Path(storage_path / f"sstable_compacted_{int(time())}.sst")
+            new_sstable_path = Path(storage_path / f"sstable_compacted_{time_ns()}.sst")
             merged_data = self.merge_sstables(level0_sstables, sstable_manager)
 
             # Write merged data to new SSTable

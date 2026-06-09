@@ -147,7 +147,7 @@ class SSTable:
 
         Args:
             start_key: Inclusive start of the range.
-            end_key: Inclusive end of the range.
+            end_key: Exclusive end of the range.
 
         Yields:
             Dictionary(key, value) in sorted order.
@@ -159,11 +159,11 @@ class SSTable:
         )
     
         for key in sorted(self.index.keys()):
-            if start_key <= key <= end_key:
+            if start_key <= key < end_key:
                 value = self.get(key)
                 if value is not None:
                     yield key, value
-            elif key > end_key:
+            elif key >= end_key:
                 break  # Since keys are sorted, we can stop once we pass end_key
     
     def iter_items(self) -> Iterator[tuple[bytes, bytes]]:

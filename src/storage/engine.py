@@ -4,7 +4,6 @@ Manages interactions between MemTable, WAL, SSTables, and Manifest
 to provide a unified storage interface.
 """
 
-import heapq
 import logging
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -184,7 +183,7 @@ class LSMStorageEngine(StorageEngine):
         if value is None:
             # If not in MemTable, try to find it in SSTables
             value = self.sstable_manager.get(key)
-        if not value or value == b"__TOMBSTONE__":
+        if value is None or value == b"__TOMBSTONE__":
             raise KeyError(key)
         logger.debug(f"GET {key} -> {len(value)} bytes")
         return value
@@ -211,70 +210,26 @@ class LSMStorageEngine(StorageEngine):
             Iterator of key-value pairs in the range.
         """
 
-        def _advance(iterator, index):
-            try:
-                while True:
-                    k, v = next(iterator)
-                    if index != -1 and k in memtable_keys:
-                        continue
-                    heapq.heappush(heap, (k, index, v, iterator))
-                    return
-            except StopIteration:
-                pass
-
         memtable_result = self.memtable.get_range(start_key, end_key)
-        memtable_keys = set(memtable_result.keys())
-        memtable_items = sorted(memtable_result.items())
-        last_key = None
+        seen_keys: set[bytes] = set()
+        result: dict[bytes, bytes] = {}
 
-
-        # Check overlapping SSTables (if any)
-        overlapping_sstables = self.sstable_manager.get_overlapping_sstables(
-            start_key, end_key
-        )
-
-        heap: list[tuple[bytes, int, bytes, Iterator[tuple[bytes, bytes]]]] = []  # (key, sstable_index, value, iterator)
-
-        memtable_iter = iter(memtable_items)
-        memtable_record = next(memtable_iter, (None, None))  # Get the first item from the memtable result, or (None, None) if it's empty
-
-        if memtable_record[0] is not None:
-         # Get the first item from the memtable result, or (None, None) if it's empty
-            heapq.heappush(heap, (memtable_record[0], -1, memtable_record[1], memtable_iter))  # Use index -1 for memtable to prioritize it over SSTables
-
-        for i, sstable in enumerate(sorted(overlapping_sstables, key=lambda s: s.path, reverse=True)):  # Sort SSTables by path in reverse order to prioritize newer SSTables
-            it = sstable.range_scan(start_key, end_key)
-            key, value = next(it, (None, None))  # Get the first item from each iterator, or (None, None) if it's empty
-
-            if key is not None and key not in memtable_keys:
-                heapq.heappush(heap, (key, i, value, it))
-
-        while heap:
-            key, source_index, value, iterator = heapq.heappop(heap)
-
-            # Safety
-            if key < start_key:
-                _advance(iterator, source_index)
-                continue
-
-            # Safety
-            if key >= end_key:
-                break
-
-            if last_key is not None and key == last_key:
-                logger.debug(f"Skipping duplicate key: {key} from source index {source_index}")
-                _advance(iterator, source_index)
-                continue
-
+        for key, value in memtable_result.items():
+            seen_keys.add(key)
             if value != b"__TOMBSTONE__":
-                yield key, value
+                result[key] = value
 
-            last_key = key
-            _advance(iterator, source_index)
+        # SSTables are returned in read priority order: lower levels first,
+        # newest before older within each level.
+        for sstable in self.sstable_manager.get_overlapping_sstables(start_key, end_key):
+            for key, value in sstable.range_scan(start_key, end_key):
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                if value != b"__TOMBSTONE__":
+                    result[key] = value
 
-
-
-
+        yield from sorted(result.items())
 
     def batch_put(self, keys: list[bytes], values: list[bytes]) -> None:
         """Write multiple key-value pairs atomically.

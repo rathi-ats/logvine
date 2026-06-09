@@ -5,6 +5,10 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
+import pytest
+
+from src.config import SETTINGS
+from src.storage.exceptions import BatchTooLargeException
 from src.storage.engine import LSMStorageEngine
 
 
@@ -39,6 +43,71 @@ def test_put_get_delete_batch_put_and_range_read() -> None:
             assert False, "Expected KeyError for deleted key"
         except KeyError:
             pass
+
+
+def test_read_key_range_uses_exclusive_end() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        engine = LSMStorageEngine(tmpdir)
+        engine.put(b"user:1", b"Alice")
+        engine.put(b"user:2", b"Bob")
+        engine.put(b"user:3", b"Charlie")
+
+        range_items = list(engine.read_key_range(b"user:1", b"user:3"))
+
+        assert dict(range_items) == {
+            b"user:1": b"Alice",
+            b"user:2": b"Bob",
+        }
+
+
+def test_get_returns_empty_byte_value() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        engine = LSMStorageEngine(tmpdir)
+        engine.put(b"empty", b"")
+
+        assert engine.get(b"empty") == b""
+
+
+def test_range_read_prefers_newer_l0_over_compacted_l1() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        engine = LSMStorageEngine(tmpdir)
+        engine.compaction.may_start_compaction = lambda _manifest, _path: None
+
+        engine.put(b"k", b"old")
+        _flush_current_memtable(engine)
+        engine.put(b"a", b"1")
+        _flush_current_memtable(engine)
+        engine.put(b"z", b"9")
+        _flush_current_memtable(engine)
+
+        engine.compaction.compact(engine.manifest, engine.storage_path)
+
+        engine.put(b"k", b"new")
+        _flush_current_memtable(engine)
+
+        assert engine.get(b"k") == b"new"
+        assert dict(engine.read_key_range(b"a", b"z"))[b"k"] == b"new"
+
+
+def test_range_read_newer_l0_value_survives_compacted_l1_tombstone() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        engine = LSMStorageEngine(tmpdir)
+        engine.compaction.may_start_compaction = lambda _manifest, _path: None
+
+        engine.put(b"k", b"old")
+        _flush_current_memtable(engine)
+        engine.delete(b"k")
+        _flush_current_memtable(engine)
+        engine.put(b"z", b"9")
+        _flush_current_memtable(engine)
+
+        engine.compaction.compact(engine.manifest, engine.storage_path)
+
+        engine.put(b"k", b"new")
+        _flush_current_memtable(engine)
+
+        assert engine.get(b"k") == b"new"
+        assert dict(engine.read_key_range(b"a", b"z"))[b"k"] == b"new"
 
 
 def test_flush_persists_to_sstable_and_manifest() -> None:
@@ -112,3 +181,15 @@ def test_compaction_merges_l0_to_l1_and_keeps_latest_value() -> None:
         assert recovered.get(b"a") == b"v1"
         assert recovered.get(b"b") == b"new"
         assert recovered.get(b"c") == b"v3"
+
+
+def test_batch_put_raises_when_batch_is_too_large() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        engine = LSMStorageEngine(tmpdir)
+        original_limit = SETTINGS.memtable_max_size
+        object.__setattr__(SETTINGS, "memtable_max_size", 1)
+        try:
+            with pytest.raises(BatchTooLargeException):
+                engine.batch_put([b"k"], [b"value"])
+        finally:
+            object.__setattr__(SETTINGS, "memtable_max_size", original_limit)

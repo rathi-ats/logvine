@@ -46,6 +46,27 @@ def test_get_prefers_newer_sstable_entry(tmp_path):
     assert manager.get(b"missing") is None
 
 
+def test_get_checks_older_overlapping_sstable_after_newer_miss(tmp_path):
+    manifest = Manifest(tmp_path / "manifest.json")
+    manager = SSTableManager(manifest)
+
+    older = _write_sstable(
+        tmp_path / "sstable_100.sst",
+        0,
+        [(b"a", b"1"), (b"z", b"26")],
+    )
+    newer = _write_sstable(
+        tmp_path / "sstable_200.sst",
+        0,
+        [(b"m", b"13"), (b"z", b"27")],
+    )
+
+    manifest.add_sstable(0, manager.build_metadata(older, level=0))
+    manifest.add_sstable(0, manager.build_metadata(newer, level=0))
+
+    assert manager.get(b"a") == b"1"
+
+
 def test_get_overlapping_sstables_returns_only_overlaps(tmp_path):
     manifest = Manifest(tmp_path / "manifest.json")
     manager = SSTableManager(manifest)

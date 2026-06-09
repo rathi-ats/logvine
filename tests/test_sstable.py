@@ -17,7 +17,7 @@ def test_write_and_get_round_trip(tmp_path):
     assert sstable.get(b"missing") is None
 
 
-def test_range_scan_is_inclusive_and_sorted(tmp_path):
+def test_range_scan_uses_exclusive_end_and_is_sorted(tmp_path):
     path = tmp_path / "range.sst"
     sstable = SSTable(path)
     pairs = [(b"a", b"1"), (b"b", b"2"), (b"c", b"3"), (b"d", b"4")]
@@ -25,7 +25,7 @@ def test_range_scan_is_inclusive_and_sorted(tmp_path):
     asyncio.run(sstable.write(iter(pairs)))
 
     scanned = list(sstable.range_scan(b"b", b"d"))
-    assert scanned == [(b"b", b"2"), (b"c", b"3"), (b"d", b"4")]
+    assert scanned == [(b"b", b"2"), (b"c", b"3")]
 
 
 def test_iter_items_returns_all_items_sorted(tmp_path):

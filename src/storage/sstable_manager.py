@@ -27,9 +27,13 @@ class SSTableManager:
             level_entries = [(level, self.manifest.get_level_sstables(level))]
 
         for level_id, entries in level_entries:
-            for sstable_meta in sorted(
-                entries,
-                key=lambda item: item["path"],
+            for _, sstable_meta in sorted(
+                enumerate(entries),
+                key=lambda item: (
+                    item[1].get("created_at_ms", 0),
+                    item[1]["path"],
+                    item[0],
+                ),
                 reverse=newest_first,
             ):
                 yield level_id, sstable_meta
@@ -68,12 +72,14 @@ class SSTableManager:
                 )
                 continue
 
-            sstable = SSTable(Path(sstable_meta["path"]))
+            sstable = self.metadata_to_sstable(sstable_meta)
             logger.info(
                 f"Searching for key {key} in SSTable {sstable_meta['path']} (level {level})"
             )
             logger.debug(f"min_key: {min_key}, max_key: {max_key}")
-            return sstable.get(key)
+            value = sstable.get(key)
+            if value is not None:
+                return value
         return None
 
     def get_overlapping_sstables(self, start_key: bytes, end_key: bytes) -> list[SSTable]:
@@ -82,7 +88,7 @@ class SSTableManager:
         for level, sstable_meta in self.iter_sstable_metadata():
             min_key = bytes.fromhex(sstable_meta["min_key_hex"])
             max_key = bytes.fromhex(sstable_meta["max_key_hex"])
-            if end_key < min_key or start_key > max_key:
+            if end_key <= min_key or start_key > max_key:
                 logger.info(
                     f"Range {start_key}-{end_key} is out of range for SSTable "
                     f"{sstable_meta['path']} (level {level}), skipping"
