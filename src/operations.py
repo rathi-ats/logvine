@@ -330,7 +330,7 @@ class ReadKeyRangeOperation(RangeRequestOperation):
 
         Args:
             start_key: Inclusive start of the range.
-            end_key: Inclusive end of the range.
+            end_key: Exclusive end of the range.
         """
         self.start_key = start_key
         self.end_key = end_key
